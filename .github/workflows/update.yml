@@ -2,8 +2,11 @@ name: Update market data
 
 on:
   schedule:
-    # 화~토 07:30 KST (= 월~금 22:30 UTC). 미국 정규장 마감(서머타임 20:00 / 표준시 21:00 UTC) 이후.
-    - cron: "30 22 * * 1-5"
+    # 미국 정규장 마감(서머타임 20:00 / 표준시 21:00 UTC) 이후, 화~토 한국시간 기준 3회 실행.
+    # GitHub 예약 실행은 지연·누락될 수 있어 중복 배치함(같은 기준일이면 결과 동일).
+    - cron: "37 22 * * 1-5"   # 07:37 KST
+    - cron: "37 0 * * 2-6"    # 09:37 KST
+    - cron: "7 3 * * 2-6"     # 12:07 KST
   workflow_dispatch: {}
 
 permissions:
