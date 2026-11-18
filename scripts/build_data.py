@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ import requests
 TOP_N = 20
 MIN_COVERAGE = 0.90          # 지수별 가격 수집률이 이보다 낮으면 실패 처리(기존 data.json 유지)
 CHUNK = 150
+SETTLE_ET = dt.time(17, 0)   # 뉴욕 시각 이 이전의 당일 봉은 미확정으로 간주
 OUT = Path(__file__).resolve().parent.parent / "docs" / "data.json"
 
 HEADERS = {
@@ -192,7 +194,7 @@ def download_prices(symbols: list[str]) -> pd.DataFrame:
 def settle_asof(prices: pd.DataFrame, now_ny: dt.datetime | None = None) -> pd.DataFrame:
     """장중 미확정 봉 제거 + 과반 종목에 종가가 있는 마지막 날짜까지 자르기."""
     now_ny = now_ny or dt.datetime.now(ZoneInfo("America/New_York"))
-    if prices.index[-1].date() == now_ny.date() and now_ny.time() < dt.time(16, 20):
+    if prices.index[-1].date() == now_ny.date() and now_ny.time() < SETTLE_ET:
         log("  장 마감 전 실행 → 당일 미확정 봉 제외")
         prices = prices.iloc[:-1]
     cover = prices.notna().mean(axis=1)
@@ -249,7 +251,40 @@ def build_index(meta: pd.DataFrame, rets: pd.DataFrame, last: pd.Series) -> dict
             "missing": missing, "stats": stats, "top": top, "bottom": bottom}
 
 
+def latest_settled_date() -> str | None:
+    """SPY 일봉으로 확정된 최근 거래일(YYYY-MM-DD)을 확인. 실패 시 None."""
+    try:
+        import yfinance as yf
+        df = yf.download(["SPY"], period="10d", interval="1d", auto_adjust=True, progress=False)
+        idx = pd.to_datetime(df["Close"].dropna(how="all").index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        idx = idx.normalize()
+        now_ny = dt.datetime.now(ZoneInfo("America/New_York"))
+        if len(idx) and idx[-1].date() == now_ny.date() and now_ny.time() < SETTLE_ET:
+            idx = idx[:-1]
+        return idx[-1].strftime("%Y-%m-%d") if len(idx) else None
+    except Exception as e:  # noqa: BLE001
+        log(f"  [경고] 최근 거래일 확인 실패 → 전체 수집 진행 ({e})")
+        return None
+
+
+def already_current() -> bool:
+    if os.environ.get("FORCE"):
+        return False
+    try:
+        have = json.loads(OUT.read_text(encoding="utf-8")).get("asof")
+    except Exception:  # noqa: BLE001
+        return False
+    latest = latest_settled_date()
+    log(f"[확인] 저장된 기준일 {have} / 확정된 최근 거래일 {latest}")
+    return bool(latest) and have is not None and have >= latest
+
+
 def main() -> int:
+    if already_current():
+        log("[생략] 이미 최신 기준일 데이터임")
+        return 0
     universe = [
         ("sp500", "S&P 500", get_sp500, "Wikipedia"),
         ("ndx100", "NASDAQ 100", get_ndx, "Wikipedia"),
