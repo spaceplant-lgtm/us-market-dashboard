@@ -191,6 +191,66 @@ def download_prices(symbols: list[str]) -> pd.DataFrame:
     return prices.apply(pd.to_numeric, errors="coerce")
 
 
+def _pending_close(symbol: str) -> tuple[dt.date, float] | None:
+    """Yahoo 차트 메타의 (정규장 최종 체결일[뉴욕], 정규장 종가). 실패 시 None.
+
+    장 마감 후 몇 시간 동안 Yahoo 일봉의 당일 종가가 비어(null) 있는 경우가 있는데,
+    이때도 메타의 regularMarketPrice에는 정규장 종가가 들어 있다.
+    """
+    try:
+        import yfinance as yf
+        m = yf.Ticker(symbol).get_history_metadata()
+        price, t = m.get("regularMarketPrice"), m.get("regularMarketTime")
+        if price is None or t is None:
+            return None
+        ts = pd.Timestamp(t, unit="s", tz="UTC") if isinstance(t, (int, float)) else pd.Timestamp(t)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        price = float(price)
+        if not price > 0:
+            return None
+        return ts.tz_convert("America/New_York").date(), price
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _settled_today(now_ny: dt.datetime | None = None) -> dt.date | None:
+    """지금이 평일 장 마감(SETTLE_ET) 이후이면 오늘(뉴욕) 날짜, 아니면 None."""
+    now_ny = now_ny or dt.datetime.now(ZoneInfo("America/New_York"))
+    return now_ny.date() if now_ny.weekday() < 5 and now_ny.time() >= SETTLE_ET else None
+
+
+def fill_pending_close(prices: pd.DataFrame, now_ny: dt.datetime | None = None) -> pd.DataFrame:
+    """장 마감 후인데 당일 일봉 종가가 아직 비어 있으면 정규장 종가(차트 메타)로 채운다."""
+    today = _settled_today(now_ny)
+    if today is None:
+        return prices
+    day = pd.Timestamp(today)
+    have = float(prices.loc[day].notna().mean()) if day in prices.index else 0.0
+    if have >= 0.5:
+        return prices
+    probe = _pending_close("SPY")
+    if not probe or probe[0] != today:
+        log(f"  당일({today}) 종가 없음 · 정규장 체결 기록도 없음 → 휴장일로 보고 직전 거래일 사용")
+        return prices
+    log(f"  당일({today}) 일봉 종가 미확정(보유율 {have:.0%}) → 정규장 종가로 보완")
+    from concurrent.futures import ThreadPoolExecutor
+    symbols = list(prices.columns)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(_pending_close, symbols))
+    prices = prices.copy()
+    if day not in prices.index:
+        prices.loc[day] = float("nan")
+        prices = prices.sort_index()
+    filled = 0
+    for sym, res in zip(symbols, results):
+        if res and res[0] == today and pd.isna(prices.at[day, sym]):
+            prices.at[day, sym] = res[1]
+            filled += 1
+    log(f"  정규장 종가 보완 {filled}/{len(symbols)}종목")
+    return prices
+
+
 def settle_asof(prices: pd.DataFrame, now_ny: dt.datetime | None = None) -> pd.DataFrame:
     """장중 미확정 봉 제거 + 과반 종목에 종가가 있는 마지막 날짜까지 자르기."""
     now_ny = now_ny or dt.datetime.now(ZoneInfo("America/New_York"))
@@ -263,6 +323,11 @@ def latest_settled_date() -> str | None:
         now_ny = dt.datetime.now(ZoneInfo("America/New_York"))
         if len(idx) and idx[-1].date() == now_ny.date() and now_ny.time() < SETTLE_ET:
             idx = idx[:-1]
+        today = _settled_today(now_ny)
+        if today and (not len(idx) or idx[-1].date() < today):
+            probe = _pending_close("SPY")      # 일봉 종가는 비어 있어도 정규장은 끝난 경우
+            if probe and probe[0] == today:
+                return today.strftime("%Y-%m-%d")
         return idx[-1].strftime("%Y-%m-%d") if len(idx) else None
     except Exception as e:  # noqa: BLE001
         log(f"  [경고] 최근 거래일 확인 실패 → 전체 수집 진행 ({e})")
@@ -299,7 +364,7 @@ def main() -> int:
 
     symbols = sorted(set().union(*(m["yahoo"] for m in metas.values())))
     log(f"[가격] 총 {len(symbols)}종목 다운로드")
-    prices = settle_asof(download_prices(symbols))
+    prices = settle_asof(fill_pending_close(download_prices(symbols)))
     rets, bases, last = compute_returns(prices)
     asof = prices.index[-1].strftime("%Y-%m-%d")
 
