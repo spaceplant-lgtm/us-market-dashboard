@@ -236,8 +236,20 @@ def fill_pending_close(prices: pd.DataFrame, now_ny: dt.datetime | None = None) 
     log(f"  당일({today}) 일봉 종가 미확정(보유율 {have:.0%}) → 정규장 종가로 보완")
     from concurrent.futures import ThreadPoolExecutor
     symbols = list(prices.columns)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(_pending_close, symbols))
+    found: dict[str, tuple[dt.date, float]] = {}
+    todo = symbols
+    for workers, wait in ((8, 0), (4, 20), (2, 40), (2, 60)):   # 요청 제한(429) 대비: 실패분만 느리게 재시도
+        if not todo:
+            break
+        if wait:
+            log(f"  미응답 {len(todo)}종목 {wait}초 후 재시도")
+            time.sleep(wait)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for sym, res in zip(todo, list(ex.map(_pending_close, todo))):
+                if res:
+                    found[sym] = res
+        todo = [x for x in todo if x not in found]
+    results = [found.get(x) for x in symbols]
     prices = prices.copy()
     if day not in prices.index:
         prices.loc[day] = float("nan")
