@@ -60,6 +60,36 @@
   details { margin-top: 6px; } details p { margin: 4px 0; word-break: break-all; }
   #msg { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 24px; color: var(--ink2); }
   .stale { color: rgb(var(--warm)); font-weight: 600; }
+  .btn { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit;
+    padding: 7px 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { border-color: var(--ink3); }
+  .btn:disabled { color: var(--ink3); cursor: default; border-color: var(--line); }
+  .btn.primary { background: var(--accent); color: var(--surface); border-color: var(--accent); font-weight: 600; }
+  .btn .ic { display: inline-block; font-size: 15px; line-height: 1; }
+  .btn.busy .ic { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .btn.busy .ic { animation: none; } }
+  .rf { font-size: 12.5px; color: var(--ink2); margin-top: 3px; min-height: 18px; }
+  .rf.err { color: rgb(var(--warm)); font-weight: 600; }
+  .rf.ok { color: rgb(var(--green)); font-weight: 600; }
+  .rf a { color: inherit; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink);
+    padding: 20px; width: min(520px, calc(100vw - 32px)); font: inherit; }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+  dialog h3 { margin: 0 0 8px; font-size: 16px; }
+  dialog p, dialog ol.steps { margin: 8px 0; color: var(--ink2); font-size: 13px; }
+  dialog ol.steps { list-style: decimal; padding-left: 20px; }
+  dialog ol.steps li { margin: 3px 0; }
+  dialog a { color: var(--ink); }
+  dialog ol.steps li a, dialog ol.steps li a:hover { display: inline; padding: 0; border: 0; background: none; color: var(--ink); text-decoration: underline; }
+  .btn[hidden] { display: none; }
+  a.btn { text-decoration: none; }
+  dialog code { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  dialog input { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); margin-top: 4px; }
+  dialog .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  dialog .row .left { margin-right: auto; }
+  dialog .derr { color: rgb(var(--warm)); font-size: 12.5px; min-height: 18px; margin-top: 6px; }
   @media (max-width: 720px) { .wrap { padding: 14px 12px 40px; } .controls { margin-left: 0; } .grid { grid-template-columns: repeat(5, 78vw); } }
 </style>
 </head>
@@ -69,8 +99,10 @@
     <div>
       <h1>미국 주식 수익률 대시보드</h1>
       <div class="asof" id="asof">데이터 불러오는 중…</div>
+      <div class="rf" id="rf" role="status" aria-live="polite"></div>
     </div>
     <div class="controls">
+      <button class="btn" id="rfBtn" type="button" title="GitHub Actions 워크플로를 실행해 최신 종가로 갱신"><span class="ic" aria-hidden="true">↻</span><span id="rfLbl">데이터 갱신</span></button>
       <div class="seg" id="idxTabs" role="group" aria-label="지수 선택"></div>
       <div class="seg small" id="colorTabs" role="group" aria-label="색상 기준">
         <button data-c="kr" title="상승 빨강 / 하락 파랑">한국식 색</button>
@@ -81,12 +113,31 @@
   <main id="main"><div id="msg">데이터 불러오는 중…</div></main>
   <footer id="foot"></footer>
 </div>
+<dialog id="tkDlg" aria-labelledby="tkTitle">
+  <h3 id="tkTitle">갱신 버튼 설정 (최초 1회)</h3>
+  <p>이 페이지에서 바로 갱신하려면 GitHub 토큰이 필요합니다. 토큰은 이 브라우저에만 저장되며 GitHub API 외에는 전송되지 않습니다.</p>
+  <ol class="steps">
+    <li><a id="tkNew" target="_blank" rel="noopener">GitHub 토큰 생성 페이지</a>를 엽니다 (Fine-grained token).</li>
+    <li>Repository access: <code>Only select repositories</code> → <code id="tkRepo"></code></li>
+    <li>Repository permissions: <code>Actions</code> → <code>Read and write</code> (그 외 권한은 불필요)</li>
+    <li>생성된 토큰(<code>github_pat_…</code>)을 아래에 붙여넣고 저장합니다.</li>
+  </ol>
+  <input id="tkIn" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_…" aria-label="GitHub 토큰">
+  <div class="derr" id="tkErr"></div>
+  <div class="row">
+    <a class="btn left" id="tkManual" target="_blank" rel="noopener">토큰 없이 GitHub에서 실행</a>
+    <button class="btn" id="tkDel" type="button" hidden>저장된 토큰 삭제</button>
+    <button class="btn" id="tkCancel" type="button">취소</button>
+    <button class="btn primary" id="tkSave" type="button">저장 후 갱신</button>
+  </div>
+</dialog>
 <script>
 (function () {
   "use strict";
   var DATA = null, cur = "sp500";
   var store = { get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
-                set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+                set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+                del: function (k) { try { localStorage.removeItem(k); } catch (e) {} } };
   var $ = function (id) { return document.getElementById(id); };
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
@@ -165,13 +216,100 @@
   $("main").addEventListener("mouseover", function (e) { var li = e.target.closest("li[data-t]"); mark(li ? li.dataset.t : null); });
   $("main").addEventListener("mouseleave", function () { mark(null); });
 
+  // ── 수동 갱신: GitHub Actions 워크플로(workflow_dispatch) 실행 후 새 data.json이 배포될 때까지 대기 ──
+  var REPO = "spaceplant-lgtm/us-market-dashboard", WF = "update.yml", REF = "main";
+  var API = "https://api.github.com/repos/" + REPO + "/actions/workflows/" + WF;
+  var WF_URL = "https://github.com/" + REPO + "/actions/workflows/" + WF;
+  var TK = "umd.ghToken", POLL_MS = 15000, POLL_MAX_MS = 12 * 60000;
+  var busy = false, memToken = null;   // memToken: localStorage를 쓸 수 없는 환경용
+
+  function token() { return store.get(TK) || memToken; }
+  function rfMsg(html, cls) { var el = $("rf"); el.className = "rf" + (cls ? " " + cls : ""); el.innerHTML = html; }
+  function setBusy(b, label) {
+    busy = b; $("rfBtn").disabled = b; $("rfBtn").classList.toggle("busy", b);
+    $("rfLbl").textContent = label || (b ? "갱신 중…" : "데이터 갱신");
+  }
+  function gh(path, opt) {
+    opt = opt || {};
+    opt.headers = { "Accept": "application/vnd.github+json", "Authorization": "Bearer " + token(),
+                    "X-GitHub-Api-Version": "2022-11-28" };
+    if (opt.body) opt.headers["Content-Type"] = "application/json";
+    return fetch(API + path, opt);
+  }
+  function loadData() {
+    return fetch("data.json?t=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
+  }
+  function apply(d) {
+    DATA = d; var saved = store.get("umd.idx");
+    cur = saved && d.indices[saved] ? saved : Object.keys(d.indices)[0];
+    head(); render();
+  }
+  function openDlg(err) {
+    $("tkNew").href = "https://github.com/settings/personal-access-tokens/new";
+    $("tkManual").href = WF_URL; $("tkRepo").textContent = REPO;
+    $("tkIn").value = ""; $("tkErr").textContent = err || ""; $("tkDel").hidden = !token();
+    var d = $("tkDlg"); if (d.showModal) d.showModal(); else d.setAttribute("open", "");
+    $("tkIn").focus();
+  }
+  function closeDlg() { var d = $("tkDlg"); if (d.close) d.close(); else d.removeAttribute("open"); }
+  function fail(html) { setBusy(false); rfMsg(html, "err"); }
+  var manual = ' <a href="' + WF_URL + '" target="_blank" rel="noopener">GitHub에서 직접 실행</a>';
+
+  function refresh() {
+    if (busy) return;
+    if (!token()) { openDlg(); return; }
+    var before = DATA ? DATA.generated_utc : null, started = Date.now();
+    setBusy(true, "요청 중…"); rfMsg("갱신을 요청하는 중…");
+    gh("/dispatches", { method: "POST", body: JSON.stringify({ ref: REF }) }).then(function (r) {
+      if (r.status === 401) { setBusy(false); rfMsg(""); openDlg("토큰이 만료되었거나 잘못되었습니다. 새 토큰을 입력해 주세요."); return; }
+      if (r.status === 403 || r.status === 404) { setBusy(false); rfMsg("");
+        openDlg("토큰에 이 저장소의 Actions 쓰기 권한이 없습니다 (HTTP " + r.status + "). 권한을 확인해 주세요."); return; }
+      if (!r.ok) { fail("갱신 요청 실패 (HTTP " + r.status + ")." + manual); return; }
+      setBusy(true); rfMsg("갱신 실행 중… 보통 3~5분 걸립니다. 완료되면 화면이 자동으로 바뀝니다.");
+      setTimeout(function () { poll(before, started); }, POLL_MS);
+    }).catch(function (e) { fail("갱신 요청 실패: " + esc(e.message) + "." + manual); });
+  }
+
+  function poll(before, started) {
+    var elapsed = Date.now() - started;
+    if (elapsed > POLL_MAX_MS) { fail("시간 초과 — 갱신 결과를 확인하지 못했습니다." + manual.replace("직접 실행", "실행 기록 확인")); return; }
+    var again = function () { setTimeout(function () { poll(before, started); }, POLL_MS); };
+    loadData().then(function (d) {
+      if (d.generated_utc !== before) {
+        var same = DATA && d.asof === DATA.asof; apply(d); setBusy(false);
+        rfMsg(same ? "갱신 완료 — 기준일은 그대로입니다 (" + esc(d.asof) + "). 장 마감 전이거나 미국 휴장일일 수 있습니다."
+                   : "갱신 완료 — 기준일 " + esc(d.asof), "ok");
+        return;
+      }
+      // 아직 그대로면 워크플로 실행 상태를 확인해 실패를 일찍 알림
+      return gh("/runs?event=workflow_dispatch&per_page=1").then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+        var run = j && j.workflow_runs && j.workflow_runs[0];
+        if (run && new Date(run.created_at).getTime() >= started - 60000 && run.status === "completed" && run.conclusion !== "success") {
+          fail("워크플로 실패 (" + esc(run.conclusion) + '). <a href="' + esc(run.html_url) + '" target="_blank" rel="noopener">실행 로그 보기</a>');
+          return;
+        }
+        var min = Math.floor(elapsed / 60000);
+        rfMsg("갱신 실행 중… " + (min ? min + "분 경과. " : "") + "완료되면 화면이 자동으로 바뀝니다.");
+        again();
+      });
+    }).catch(again);
+  }
+
+  $("rfBtn").addEventListener("click", function (e) { if (e.shiftKey || e.altKey) openDlg(); else refresh(); });
+  $("tkCancel").addEventListener("click", closeDlg);
+  $("tkDel").addEventListener("click", function () { store.del(TK); memToken = null; closeDlg(); rfMsg("저장된 토큰을 삭제했습니다."); });
+  function saveToken() {
+    var v = $("tkIn").value.trim();
+    if (!/^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$/.test(v)) { $("tkErr").textContent = "토큰 형식이 올바르지 않습니다 (github_pat_… 로 시작)."; return; }
+    store.set(TK, v); memToken = v; closeDlg(); refresh();
+  }
+  $("tkSave").addEventListener("click", saveToken);
+  $("tkIn").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); saveToken(); } });
+
   setColor(store.get("umd.color") === "us" ? "us" : "kr");
-  fetch("data.json?t=" + Date.now(), { cache: "no-store" })
-    .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(function (d) {
-      DATA = d; var saved = store.get("umd.idx");
-      cur = saved && d.indices[saved] ? saved : Object.keys(d.indices)[0];
-      head(); render(); })
+  loadData()
+    .then(apply)
     .catch(function (err) {
       $("asof").textContent = "데이터 없음";
       $("msg").innerHTML = "<b>data.json을 불러오지 못했습니다.</b><br>GitHub 저장소의 Actions 탭에서 " +
